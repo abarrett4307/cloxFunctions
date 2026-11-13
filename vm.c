@@ -13,8 +13,52 @@
 
 VM vm;
 
-static Value clockNative(int argCount, Value* args) {
-  return NUMBER_VAL((double)clock() / CLOCKS_PER_SEC);
+static bool clockNative(int argCount, Value* args, Value* result) {
+  *result = NUMBER_VAL((double)clock() / CLOCKS_PER_SEC);
+  return true;
+}
+
+static int compareChars(const void* a, const void* b) {
+  return (int)*(const unsigned char*)a - (int)*(const unsigned char*)b;
+}
+
+static bool sortNative(int argCount, Value* args, Value* result) {
+  (void)argCount;
+  if (!IS_STRING(args[0])) return false;
+
+  ObjString* string = AS_STRING(args[0]);
+  char* chars = ALLOCATE(char, string->length + 1);
+  memcpy(chars, string->chars, string->length);
+  chars[string->length] = '\0';
+  qsort(chars, string->length, sizeof(char), compareChars);
+
+  *result = OBJ_VAL(takeString(chars, string->length));
+  return true;
+}
+
+static bool substringNative(int argCount, Value* args, Value* result) {
+  (void)argCount;
+  if (!IS_STRING(args[0]) || !IS_NUMBER(args[1]) || !IS_NUMBER(args[2])) {
+    return false;
+  }
+
+  ObjString* string = AS_STRING(args[0]);
+  double startValue = AS_NUMBER(args[1]);
+  double lengthValue = AS_NUMBER(args[2]);
+  if (!(startValue >= 0 && startValue <= string->length) ||
+      startValue != (int)startValue || !(lengthValue >= 0)) {
+    return false;
+  }
+
+  int start = (int)startValue;
+  int length = string->length - start;
+  if (lengthValue < length) {
+    if (lengthValue != (int)lengthValue) return false;
+    length = (int)lengthValue;
+  }
+
+  *result = OBJ_VAL(copyString(string->chars + start, length));
+  return true;
 }
 
 static void resetStack() {
@@ -45,9 +89,9 @@ static void runtimeError(const char* format, ...) {
   resetStack();
 }
 
-static void defineNative(const char* name, NativeFn function) {
+static void defineNative(const char* name, int arity, NativeFn function) {
   push(OBJ_VAL(copyString(name, (int)strlen(name))));
-  push(OBJ_VAL(newNative(function)));
+  push(OBJ_VAL(newNative(arity, function)));
   tableSet(&vm.globals, AS_STRING(vm.stack[0]), vm.stack[1]);
   pop();
   pop();
@@ -60,7 +104,9 @@ void initVM() {
   initTable(&vm.globals);
   initTable(&vm.strings);
 
-  defineNative("clock", clockNative);
+  defineNative("clock", 0, clockNative);
+  defineNative("sort", 1, sortNative);
+  defineNative("substring", 3, substringNative);
 }
 
 void freeVM() {
@@ -108,8 +154,17 @@ static bool callValue(Value callee, int argCount) {
       case OBJ_FUNCTION:
         return call(AS_FUNCTION(callee), argCount);
       case OBJ_NATIVE: {
-        NativeFn native = AS_NATIVE(callee);
-        Value result = native(argCount, vm.stackTop - argCount);
+        ObjNative* native = (ObjNative*)AS_OBJ(callee);
+        if (argCount != native->arity) {
+          runtimeError("Expected %d arguments but got %d.",
+              native->arity, argCount);
+          return false;
+        }
+        Value result;
+        if (!native->function(argCount, vm.stackTop - argCount, &result)) {
+          runtimeError("Native function failed.");
+          return false;
+        }
         vm.stackTop -= argCount + 1;
         push(result);
         return true;
